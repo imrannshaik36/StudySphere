@@ -1,6 +1,8 @@
+import { useAuth } from '../context/AuthContext';
 import './Header.css';
 
 export default function Header() {
+    const { user } = useAuth();
     const hour = new Date().getHours();
     const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
 
@@ -8,28 +10,12 @@ export default function Header() {
         <header className="header">
             <div className="header-left">
                 <h1 className="header-greeting">
-                    {greeting}, <span className="text-gradient">Karthik</span> 👋
+                    {greeting}, <span className="text-gradient">{user?.name || 'Student'}</span> 👋
                 </h1>
                 <p className="header-sub">Here's your study overview for today</p>
             </div>
 
             <div className="header-right">
-                <div className="search-box">
-                    <span className="search-icon">🔍</span>
-                    <input
-                        id="search-input"
-                        type="text"
-                        placeholder="Search subjects, notes…"
-                        className="search-input"
-                    />
-                    <span className="search-shortcut">⌘K</span>
-                </div>
-
-                <button className="icon-btn" id="notifications-btn" title="Notifications">
-                    <span>🔔</span>
-                    <span className="notif-badge">3</span>
-                </button>
-
                 <div className="header-date">
                     <span className="date-day">
                         {new Date().toLocaleDateString('en-US', { weekday: 'long' })}

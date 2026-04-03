@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useAuth } from './context/AuthContext';
+import { API_BASE_URL } from './config';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import StudyTimer from './components/StudyTimer';
@@ -69,10 +71,51 @@ const modules = [
 
 export default function Dashboard() {
     const [activeNav, setActiveNav] = useState('dashboard');
+    const [savedGoals, setSavedGoals] = useState([]);
+    const [selectedGoal, setSelectedGoal] = useState(null);
+    const { user } = useAuth();
+
+    useEffect(() => {
+        if (!user) return;
+        fetch(`${API_BASE_URL}/api/goals`, {
+            headers: { 'Authorization': `Bearer ${user.token}` }
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                setSavedGoals(data.goals || []);
+            }
+        }).catch(err => console.error(err));
+    }, [user]);
+
+    const handleSaveGoal = async (goalData) => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/api/goals`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
+                body: JSON.stringify({ title: goalData.name, tasks: goalData.tasks })
+            });
+            const data = await res.json();
+            if (data.success) setSavedGoals(prev => [data.goal, ...prev]);
+        } catch(e) { console.error('Failed to save goal', e); }
+    };
+
+    const handleDeleteGoal = async (goalId) => {
+        try {
+            await fetch(`${API_BASE_URL}/api/goals/${goalId}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${user.token}` }
+            });
+            setSavedGoals(prev => prev.filter(g => g._id !== goalId));
+        } catch(e) { console.error('Failed to delete goal', e); }
+    };
 
     return (
         <div className="dashboard-layout">
-            <Sidebar active={activeNav} onNav={setActiveNav} />
+            <Sidebar active={activeNav} onNav={(nav) => {
+                if (nav === 'study-planner' && activeNav !== 'study-planner') setSelectedGoal(null);
+                setActiveNav(nav);
+            }} />
 
             <div className="dashboard-main">
                 <Header />
@@ -115,9 +158,9 @@ export default function Dashboard() {
 
                     {activeNav === 'timer' && <StudyTimer />}
                     {activeNav === 'notes' && <Notes />}
-                    {activeNav === 'subjects' && <MySubjects />}
+                    {activeNav === 'subjects' && <MySubjects goals={savedGoals} onDeleteGoal={handleDeleteGoal} onSelectGoal={(g) => { setSelectedGoal({ name: g.title || g.name, tasks: g.tasks }); setActiveNav('study-planner'); }} />}
                     {activeNav === 'learning-hub' && <LearningHubV2 />}
-                    {activeNav === 'study-planner' && <StudyPlanner />}
+                    {activeNav === 'study-planner' && <StudyPlanner selectedSubject={selectedGoal} onSaveSubject={(g) => { handleSaveGoal(g); setSelectedGoal(null); }} />}
                     {activeNav === 'ai-chat' && <AIAssistant />}
                     {activeNav === 'analytics' && <Analytics />}
                 </main>

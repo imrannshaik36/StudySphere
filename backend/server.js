@@ -5,6 +5,7 @@ const multer = require('multer');
 const pdfParse = require('pdf-parse');
 const fs = require('fs');
 const path = require('path');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 // Port 5000 is sometimes taken by other local services on macOS.
@@ -15,25 +16,13 @@ const PORT = process.env.PORT || 5001;
 app.use(cors());
 app.use(express.json());
 
-// Disk-backed MVP storage
-const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
-const learningHubSessions = new Map();
+const connectDB = require('./config/db');
+connectDB(); // Initialize MongoDB
+app.use('/api/auth', require('./routes/authRoutes'));
 
-if (fs.existsSync(SESSIONS_FILE)) {
-    try {
-        const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-        for (const [k, v] of Object.entries(data)) {
-            learningHubSessions.set(k, v);
-        }
-    } catch(e) { console.error("Failed to load sessions.json", e); }
-}
-
-const saveSessionsToDisk = () => {
-    try {
-        const obj = Object.fromEntries(learningHubSessions);
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(obj));
-    } catch(e) { console.error("Failed to save sessions.json", e); }
-};
+const { protect } = require('./middleware/authMiddleware');
+const LearningSession = require('./models/LearningSession');
+const Goal = require('./models/Goal');
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 10 * 1024 * 1024 } // 10MB
@@ -53,10 +42,24 @@ const normalizeProgress = (progressNum) => {
 
 const GROK_API_KEY = process.env.GROK_API_KEY;
 
-async function callGrokAPI(prompt, systemPrompt = "You are an expert educational curriculum designer and subject matter expert. Your goal is to teach the student with crystal-clear, deep, and flawless pedagogical content.") {
+async function callGrokAPI(prompt, systemPrompt = "You are an expert educational curriculum designer and subject matter expert. Your goal is to teach the student with crystal-clear, deep, and flawless pedagogical content.", jsonMode = true) {
     if (!GROK_API_KEY) throw new Error("Missing GROK_API_KEY in environment variables. Please add GROK_API_KEY=your_key in your backend/.env file.");
     
     console.log("Calling Groq API length of prompt: ", prompt.length);
+
+    const bodyObj = {
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt }
+        ],
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0.3,
+        max_tokens: 8000
+    };
+    
+    if (jsonMode) {
+        bodyObj.response_format = { type: "json_object" };
+    }
 
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -64,16 +67,7 @@ async function callGrokAPI(prompt, systemPrompt = "You are an expert educational
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${GROK_API_KEY}`
         },
-        body: JSON.stringify({
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt }
-            ],
-            model: 'llama-3.3-70b-versatile',
-            temperature: 0.3,
-            max_tokens: 8000,
-            response_format: { type: "json_object" }
-        })
+        body: JSON.stringify(bodyObj)
     });
     
     const data = await res.json();
@@ -236,7 +230,7 @@ app.get('/api/learning-hub', (req, res) => {
 });
 
 // Generate modules: AI Roadmap
-app.post('/api/learning-hub/generate/ai', async (req, res) => {
+app.post('/api/learning-hub/generate/ai', protect, async (req, res) => {
     const { subject, topics } = req.body || {};
     if (!subject || !String(subject).trim()) {
         return res.status(400).json({ success: false, message: 'Missing `subject`.' });
@@ -271,7 +265,8 @@ The JSON object MUST strictly follow this structure:
       "deepDive": "An incredibly deep, under-the-hood analysis and breakdown of how the concept works theoretically.",
       "codeExample": "If coding/algorithm related, provide a robust code walkthrough. If database related, provide SQL queries. If theoretical (like ANN, Cloud), provide an ASCII text-based flowchart or structural diagram.",
       "useCases": "Detailed real-world applications and scenarios where this concept is indispensable.",
-      "advantagesDisadvantages": "A thorough comparison of the pros, cons, tradeoffs, and limitations in Markdown bullet points."
+      "advantagesDisadvantages": "A thorough comparison of the pros, cons, tradeoffs, and limitations in Markdown bullet points.",
+      "practiceQuestions": ["Rigorous question 1", "Rigorous question 2", "Rigorous question 3", "Rigorous question 4", "Rigorous question 5"]
     }
   ], 
   "flashcards": [
@@ -291,8 +286,9 @@ Instructions:
 1. ${conceptInstruction} Difficulty must be "easy", "medium", or "hard".
 2. Generate exactly 6 challenging flashcards.
 3. Generate exactly 5 rigorous quiz questions mapping to the learning material. "correctIndex" must be an integer (0-3).
-4. Every concept MUST comprehensively fill out definition, deepDive, codeExample, useCases, and advantagesDisadvantages with immense markdown detail.
-5. CRITICAL: Escape all newlines as \\n within your JSON string values. Do not use raw literal formatting returns.
+4. Every concept MUST comprehensively fill out definition, deepDive, codeExample, useCases, advantagesDisadvantages, and practiceQuestions with immense markdown detail.
+5. Generate precisely 4 to 5 rigorous practice questions per concept in the 'practiceQuestions' array. Provide ONLY the question.
+6. CRITICAL: Escape all newlines as \\n within your JSON string values. Do not use raw literal formatting returns.
 `;
         const llmResponse = await callGrokAPI(prompt);
         let parsedData;
@@ -303,9 +299,8 @@ Instructions:
             throw new Error("LLM did not return proper JSON structure.");
         }
 
-        learningHubSessions.set(sessionId, { subject, mode: 'ai', curriculum: parsedData, createdAt: Date.now(), timeSpentSec: 0 });
-        saveSessionsToDisk();
-        return res.json({ success: true, sessionId, subject, curriculum: parsedData });
+        const dbSess = await LearningSession.create({ userId: req.user._id, subject, mode: 'ai', curriculum: parsedData });
+        return res.json({ success: true, sessionId: dbSess._id, subject, curriculum: parsedData });
 
     } catch (error) {
         console.error("Grok Gen Error:", error);
@@ -323,8 +318,8 @@ Instructions:
                 keyTakeaway: "Mock key takeaway."
             },
             concepts: [
-                { title: "Mock Concept 1", difficulty: "easy", definition: "A placeholder definition for this mock concept.", deepDive: "Deep dive text", codeExample: "Code example", useCases: "- Example use", advantagesDisadvantages: "- Pros and cons" },
-                { title: "Mock Concept 2", difficulty: "medium", definition: "A deeper placeholder definition.", deepDive: "Deep dive text", codeExample: "Code example", useCases: "- Example use", advantagesDisadvantages: "- Pros and cons" }
+                { title: "Mock Concept 1", difficulty: "easy", definition: "A placeholder definition for this mock concept.", deepDive: "Deep dive text", codeExample: "Code example", useCases: "- Example use", advantagesDisadvantages: "- Pros and cons", practiceQuestions: ["Mock Q1", "Mock Q2", "Mock Q3", "Mock Q4"] },
+                { title: "Mock Concept 2", difficulty: "medium", definition: "A deeper placeholder definition.", deepDive: "Deep dive text", codeExample: "Code example", useCases: "- Example use", advantagesDisadvantages: "- Pros and cons", practiceQuestions: ["Mock Q1", "Mock Q2", "Mock Q3", "Mock Q4"] }
             ],
             flashcards: [
                 { question: "Mock Flashcard Q1?", answer: "Mock Answer 1" },
@@ -334,25 +329,26 @@ Instructions:
                 { question: "Mock Quiz Q1?", difficulty: "easy", options: ["A", "B", "C", "D"], correctIndex: 0 }
             ]
         };
-        learningHubSessions.set(sessionId, { subject, mode: 'ai', curriculum: mockCurriculum, createdAt: Date.now(), timeSpentSec: 0 });
-        saveSessionsToDisk();
-        return res.json({ success: true, sessionId, subject, curriculum: mockCurriculum });
+        const mockSess = await LearningSession.create({ userId: req.user._id, subject, mode: 'ai', curriculum: mockCurriculum });
+        return res.json({ success: true, sessionId: mockSess._id, subject, curriculum: mockCurriculum });
     }
 });
 
-app.put('/api/learning-hub/sessions/:sessionId/time', (req, res) => {
-    const { sessionId } = req.params;
-    const { incrementSec } = req.body;
-    const session = learningHubSessions.get(sessionId);
-    if (!session) return res.status(404).json({ success: false, message: "Session not found." });
-    
-    session.timeSpentSec = (session.timeSpentSec || 0) + (Number(incrementSec) || 0);
-    saveSessionsToDisk();
-    return res.json({ success: true, timeSpentSec: session.timeSpentSec });
+app.put('/api/learning-hub/sessions/:sessionId/time', protect, async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        const { incrementSec } = req.body;
+        const session = await LearningSession.findOne({ _id: sessionId, userId: req.user._id });
+        if (!session) return res.status(404).json({ success: false, message: "Session not found." });
+        
+        session.timeSpentSec = (session.timeSpentSec || 0) + (Number(incrementSec) || 0);
+        await session.save();
+        return res.json({ success: true, timeSpentSec: session.timeSpentSec });
+    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Generate modules: Manual topic entry
-app.post('/api/learning-hub/generate/manual', (req, res) => {
+app.post('/api/learning-hub/generate/manual', protect, async (req, res) => {
     const { subject, topics } = req.body || {};
     const topicsArr = Array.isArray(topics) ? topics : [];
 
@@ -363,16 +359,15 @@ app.post('/api/learning-hub/generate/manual', (req, res) => {
         return res.status(400).json({ success: false, message: 'Missing `topics` array.' });
     }
 
-    const sessionId = makeSessionId();
-    const modules = generateManualModules(subject, topicsArr);
-    learningHubSessions.set(sessionId, { subject, mode: 'manual', modules, createdAt: Date.now() });
-    saveSessionsToDisk();
-
-    res.json({ success: true, sessionId, subject, modules });
+    try {
+        const modules = generateManualModules(subject, topicsArr);
+        const dbSess = await LearningSession.create({ userId: req.user._id, subject, mode: 'manual', modules });
+        res.json({ success: true, sessionId: dbSess._id, subject, modules });
+    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Generate modules: PDF / text upload (MVP extraction)
-app.post('/api/learning-hub/generate/pdf', upload.single('file'), async (req, res) => {
+app.post('/api/learning-hub/generate/pdf', protect, upload.single('file'), async (req, res) => {
     const { subject: subjectFromBody } = req.body || {};
     const subject = subjectFromBody && String(subjectFromBody).trim() ? String(subjectFromBody).trim() : 'Your uploaded material';
 
@@ -384,119 +379,136 @@ app.post('/api/learning-hub/generate/pdf', upload.single('file'), async (req, re
         const fileName = req.file.originalname || 'upload';
         let extractedText = '';
 
-        // Basic support for pdf vs text notes.
         if ((req.file.mimetype || '').includes('pdf') || fileName.toLowerCase().endsWith('.pdf')) {
             const parsed = await pdfParse(req.file.buffer);
             extractedText = parsed?.text || '';
         } else {
-            // Treat other uploads as plain text for MVP.
             extractedText = req.file.buffer.toString('utf8');
         }
 
         const keywords = extractKeywordsFromText(extractedText);
         const topics = keywords.length ? keywords : [`${subject} concept 1`, `${subject} concept 2`, `${subject} concept 3`];
 
-        const sessionId = makeSessionId();
         const modules = generateManualModules(subject, topics);
-        learningHubSessions.set(sessionId, {
-            subject,
-            mode: 'pdf',
-            modules,
-            createdAt: Date.now()
-        });
-        saveSessionsToDisk();
-
-        res.json({ success: true, sessionId, subject, modules, extractedTopics: topics.slice(0, 10) });
+        const dbSess = await LearningSession.create({ userId: req.user._id, subject, mode: 'pdf', modules });
+        
+        res.json({ success: true, sessionId: dbSess._id, subject, modules, extractedTopics: topics.slice(0, 10) });
     } catch (err) {
-        console.error('PDF/text extraction failed:', err);
+        console.error('PDF extraction failed:', err);
         return res.status(500).json({ success: false, message: 'Failed to process uploaded file.' });
     }
 });
 
-// Get a session (modules + progress)
-app.get('/api/learning-hub/sessions/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    const session = learningHubSessions.get(sessionId);
-    if (!session) return res.status(404).json({ success: false, message: 'Session not found.' });
-    res.json({ success: true, ...session });
+// Get a session
+app.get('/api/learning-hub/sessions/:sessionId', protect, async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        const session = await LearningSession.findOne({ _id: sessionId, userId: req.user._id });
+        if (!session) return res.status(404).json({ success: false, message: 'Session not found.' });
+        res.json({ success: true, ...session.toObject() });
+    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Update module progress inside a session
-app.post('/api/learning-hub/sessions/:sessionId/progress', (req, res) => {
-    const { sessionId } = req.params;
-    const session = learningHubSessions.get(sessionId);
-    if (!session) return res.status(404).json({ success: false, message: 'Session not found.' });
+app.post('/api/learning-hub/sessions/:sessionId/progress', protect, async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        const { moduleId, progressNum } = req.body || {};
+        const session = await LearningSession.findOne({ _id: sessionId, userId: req.user._id });
+        if (!session) return res.status(404).json({ success: false, message: 'Session not found.' });
 
-    const { moduleId, progressNum } = req.body || {};
-    const mid = Number(moduleId);
-    if (!Number.isFinite(mid)) return res.status(400).json({ success: false, message: 'Invalid `moduleId`.' });
-
-    const next = normalizeProgress(progressNum);
-
-    const idx = session.modules.findIndex(m => Number(m.id) === mid);
-    if (idx === -1) return res.status(404).json({ success: false, message: 'Module not found in session.' });
-
-    session.modules[idx] = { ...session.modules[idx], ...next };
-    learningHubSessions.set(sessionId, session);
-
-    res.json({ success: true, modules: session.modules });
+        const mid = Number(moduleId);
+        const idx = session.modules.findIndex(m => Number(m.id) === mid);
+        if (idx > -1) {
+            session.modules[idx] = { ...session.modules[idx], ...normalizeProgress(progressNum) };
+            session.markModified('modules');
+            await session.save();
+        }
+        res.json({ success: true, modules: session.modules });
+    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// Add time spent on a module (MVP: stored in memory)
-app.post('/api/learning-hub/sessions/:sessionId/modules/:moduleId/time', (req, res) => {
-    const { sessionId, moduleId } = req.params;
-    const session = learningHubSessions.get(sessionId);
-    if (!session) return res.status(404).json({ success: false, message: 'Session not found.' });
+// Add time spent on a module
+app.post('/api/learning-hub/sessions/:sessionId/modules/:moduleId/time', protect, async (req, res) => {
+    try {
+        const { sessionId, moduleId } = req.params;
+        const session = await LearningSession.findOne({ _id: sessionId, userId: req.user._id });
+        if (!session) return res.status(404).json({ success: false, message: 'Session not found.' });
 
-    const mid = Number(moduleId);
-    if (!Number.isFinite(mid)) return res.status(400).json({ success: false, message: 'Invalid `moduleId`.' });
+        const mid = Number(moduleId);
+        const { secondsToAdd } = req.body || {};
+        const add = Math.max(0, Math.floor(Number(secondsToAdd) || 0));
 
-    const { secondsToAdd } = req.body || {};
-    const add = Math.max(0, Math.floor(Number(secondsToAdd) || 0));
-
-    const idx = session.modules.findIndex(m => Number(m.id) === mid);
-    if (idx === -1) return res.status(404).json({ success: false, message: 'Module not found in session.' });
-
-    const current = Number(session.modules[idx].timeSpentSec) || 0;
-    session.modules[idx].timeSpentSec = current + add;
-    learningHubSessions.set(sessionId, session);
-
-    res.json({ success: true, modules: session.modules });
+        const idx = session.modules.findIndex(m => Number(m.id) === mid);
+        if (idx > -1) {
+            session.modules[idx].timeSpentSec = (Number(session.modules[idx].timeSpentSec) || 0) + add;
+            session.markModified('modules');
+            await session.save();
+        }
+        res.json({ success: true, modules: session.modules });
+    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// Save notes for a module (MVP: stored in memory)
-app.post('/api/learning-hub/sessions/:sessionId/modules/:moduleId/notes', (req, res) => {
-    const { sessionId, moduleId } = req.params;
-    const session = learningHubSessions.get(sessionId);
-    if (!session) return res.status(404).json({ success: false, message: 'Session not found.' });
+// Save notes for a module
+app.post('/api/learning-hub/sessions/:sessionId/modules/:moduleId/notes', protect, async (req, res) => {
+    try {
+        const { sessionId, moduleId } = req.params;
+        const session = await LearningSession.findOne({ _id: sessionId, userId: req.user._id });
+        if (!session) return res.status(404).json({ success: false, message: 'Session not found.' });
 
-    const mid = Number(moduleId);
-    if (!Number.isFinite(mid)) return res.status(400).json({ success: false, message: 'Invalid `moduleId`.' });
+        const mid = Number(moduleId);
+        const { noteText } = req.body || {};
 
-    const { noteText } = req.body || {};
-    const text = String(noteText ?? '');
-
-    const idx = session.modules.findIndex(m => Number(m.id) === mid);
-    if (idx === -1) return res.status(404).json({ success: false, message: 'Module not found in session.' });
-
-    session.modules[idx].noteText = text;
-    learningHubSessions.set(sessionId, session);
-
-    res.json({ success: true, modules: session.modules });
+        const idx = session.modules.findIndex(m => Number(m.id) === mid);
+        if (idx > -1) {
+            session.modules[idx].noteText = String(noteText || '');
+            session.markModified('modules');
+            await session.save();
+        }
+        res.json({ success: true, modules: session.modules });
+    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// Study Planner Route
-app.get('/api/study-planner', (req, res) => {
-    console.log("📅 Study Planner API hit!");
-    res.json({
-        success: true,
-        message: 'Study Planner data loaded from backend.',
-        tasks: [
-            { id: 1, task: 'Complete Calculus Chapter 4', due: 'Today' },
-            { id: 2, task: 'Review Physics Notes', due: 'Tomorrow' },
-            { id: 3, task: 'Write English Essay', due: 'Friday' }
-        ]
-    });
+// Get all subjects
+app.get('/api/learning-hub/subjects', protect, async (req, res) => {
+    try {
+        const sessions = await LearningSession.find({ userId: req.user._id }).sort({ createdAt: -1 });
+        const subjects = sessions.map(s => ({ name: s.subject, sessionId: s._id }));
+        res.json({ success: true, subjects });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// Delete a subject
+app.delete('/api/learning-hub/sessions/:sessionId', protect, async (req, res) => {
+    try {
+        await LearningSession.findOneAndDelete({ _id: req.params.sessionId, userId: req.user._id });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// ─────────────────────────────────────────
+// Goals API (Study Planner Saves)
+// ─────────────────────────────────────────
+app.get('/api/goals', protect, async (req, res) => {
+    try {
+        const goals = await Goal.find({ userId: req.user._id }).sort({ createdAt: -1 });
+        res.json({ success: true, goals });
+    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+app.post('/api/goals', protect, async (req, res) => {
+    try {
+        const { title, tasks } = req.body;
+        const newGoal = await Goal.create({ userId: req.user._id, title, tasks });
+        res.json({ success: true, goal: newGoal });
+    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+app.delete('/api/goals/:id', protect, async (req, res) => {
+    try {
+        await Goal.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // AI Assistant Route
@@ -510,21 +522,346 @@ app.get('/api/ai-chat', (req, res) => {
     });
 });
 
-// Analytics Route
-app.get('/api/analytics', (req, res) => {
-    console.log("📊 Analytics API hit!");
-    res.json({
-        success: true,
-        message: 'Analytics data successfully fetched.',
-        stats: {
-            studyHours: 42,
-            averageScore: '88%',
-            topSubject: 'Computer Science'
+// Analytics Engine based on User LearningSession data
+app.get('/api/analytics', protect, async (req, res) => {
+    try {
+        const sessions = await LearningSession.find({ userId: req.user._id });
+
+        let totalSeconds = 0;
+        const subjectTimeMap = {};
+        const dailyStudyMap = {};
+
+        sessions.forEach(session => {
+            const subject = session.subject || 'Unknown Subject';
+            if (!subjectTimeMap[subject]) subjectTimeMap[subject] = 0;
+
+            // Date processing
+            const dateStr = session.createdAt ? new Date(session.createdAt).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+            if (!dailyStudyMap[dateStr]) dailyStudyMap[dateStr] = {};
+            if (!dailyStudyMap[dateStr][subject]) dailyStudyMap[dateStr][subject] = 0;
+
+            let sessionSeconds = 0;
+            // timeSpentSec per session (top level) or per module
+            if (session.modules && Array.isArray(session.modules)) {
+                session.modules.forEach(mod => {
+                    sessionSeconds += (Number(mod.timeSpentSec) || 0);
+                });
+            } else {
+                sessionSeconds += (Number(session.timeSpentSec) || 0);
+            }
+            
+            totalSeconds += sessionSeconds;
+            subjectTimeMap[subject] += sessionSeconds;
+            dailyStudyMap[dateStr][subject] += sessionSeconds;
+        });
+
+        const studyHours = (totalSeconds / 3600).toFixed(1);
+
+        // Calculate Extrema
+        let topSubject = 'N/A';
+        let leastSubject = 'N/A';
+        let maxTime = -1;
+        let minTime = Infinity;
+
+        for (const [sub, time] of Object.entries(subjectTimeMap)) {
+            if (time > maxTime) { maxTime = time; topSubject = sub; }
+            if (time < minTime && time > 0) { minTime = time; leastSubject = sub; }
         }
-    });
+        if (minTime === Infinity && maxTime === -1) { topSubject = 'N/A'; leastSubject = 'N/A'; }
+        else if (minTime === Infinity) leastSubject = topSubject;
+
+        // Calculate Login Streak
+        const sortedDates = Object.keys(dailyStudyMap).sort((a,b) => new Date(b) - new Date(a));
+        let streak = 0;
+        let cursorDate = new Date(); // Start from today
+        cursorDate.setHours(0,0,0,0);
+
+        // Simple backward continuous timeline checker
+        if (sortedDates.length > 0) {
+            for (let i = 0; i < sortedDates.length; i++) {
+                const logDate = new Date(sortedDates[i]);
+                logDate.setHours(0,0,0,0);
+                
+                const diffTime = cursorDate - logDate;
+                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                
+                if (diffDays === 0 || diffDays === 1) {
+                    streak++;
+                    cursorDate = logDate; // Push cursor backward
+                } else if (diffDays > 1) {
+                    break; // Streak broke
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'Learning Hub Analytics',
+            stats: {
+                studyHours,
+                topSubject,
+                leastSubject,
+                streak
+            },
+            timeline: dailyStudyMap,
+            subjectBreakdown: subjectTimeMap
+        });
+    } catch (err) {
+        console.error("Analytics Error", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ─────────────────────────────────────────
+// AI Study Roadmap Generator (Gemini)
+// ─────────────────────────────────────────
+app.post('/api/generate-plan', protect, upload.single('document'), async (req, res) => {
+    try {
+        const { subject, days, hoursPerDay } = req.body;
+        const file = req.file;
+
+        let contextText = subject ? subject.trim() : 'General Computer Science Topics';
+
+        // Extract text from uploaded PDF (if any)
+        if (file) {
+            try {
+                // ✅ Lazy require — only loads pdf-parse when a PDF is actually uploaded
+                const pdfParse = require('pdf-parse');
+                const pdfData = await pdfParse(file.buffer);
+                const extracted = pdfData.text.trim();
+                if (extracted.length > 0) {
+                    contextText = extracted.substring(0, 15000);
+                }
+            } catch (pdfErr) {
+                console.warn('PDF parsing failed, falling back to subject text:', pdfErr.message);
+            }
+        }
+
+        const totalDays  = parseInt(days)       || 30;
+        const dailyHours = parseInt(hoursPerDay) || 2;
+        const totalHours = totalDays * dailyHours;
+
+        if (GROK_API_KEY) {
+            // ── Grok Path ──────────────────────────────────────────────
+            const systemPrompt = "You are an expert academic planner.";
+            const prompt = `
+Context to study: ${contextText}
+The student has exactly ${totalDays} days to study, committing ${dailyHours} hours per day (Total: ${totalHours} hours).
+
+Break down the fundamental and advanced concepts from the context into a sequential study roadmap.
+Allocate specific hours to each concept so the sum of ALL hoursAllocated equals EXACTLY ${totalHours} hours.
+
+Return ONLY a valid JSON object containing a "tasks" array — no markdown, no explanation, no extra text.
+Format:
+{
+  "tasks": [
+    { "id": 1, "task": "Concept Name", "due": "Day X", "hoursAllocated": 4, "completed": false }
+  ]
+}
+`;
+
+            const llmResponse = await callGrokAPI(prompt, systemPrompt, true);
+            let responseText = llmResponse.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+            const parsedData = JSON.parse(responseText);
+
+            return res.json({
+                success: true,
+                tasks: parsedData.tasks || [],
+                message: 'AI Roadmap Generated by Groq!'
+            });
+
+        } else {
+            // ── Mock Fallback (no API key) ────────────────────────────────
+            console.warn('⚠️  No GROK_API_KEY in .env — returning mock roadmap.');
+
+            const concepts = [
+                'Fundamentals & Basics',
+                'Core Algorithms',
+                'Advanced Theory',
+                'Practical Real-world Application',
+                'Mock Testing Phase',
+                'Final Comprehensive Review'
+            ];
+
+            let hoursLeft = totalHours;
+            const hoursPerConcept = Math.floor(totalHours / concepts.length);
+
+            const fakeTasks = concepts.map((concept, index) => {
+                const isLast = index === concepts.length - 1;
+                const hours  = isLast ? hoursLeft : hoursPerConcept;
+                hoursLeft   -= hours;
+
+                return {
+                    id:             index + 1, // ✅ ids start at 1, never 0
+                    task:           `${concept} — ${subject || 'Uploaded Material'}`,
+                    due:            `Day ${Math.ceil((index + 1) * (totalDays / concepts.length))}`,
+                    hoursAllocated: hours,
+                    completed:      false
+                };
+            });
+
+            return res.json({
+                success: true,
+                tasks:   fakeTasks,
+                message: 'Mock roadmap returned. Add GEMINI_API_KEY to .env for real AI output.'
+            });
+        }
+
+    } catch (err) {
+        console.error('❌ Error generating plan:', err);
+        res.status(500).json({
+            success: false,
+            // ✅ Send the real error so the frontend can display it
+            message: err.message || 'Failed to generate AI plan.',
+            error:   err.message
+        });
+    }
+});
+
+// ─────────────────────────────────────────
+// Concept Deep-Dive (per card detail)
+// ─────────────────────────────────────────
+app.post('/api/concept-detail', protect, async (req, res) => {
+    try {
+        const { task, subject, hoursAllocated, due } = req.body;
+
+        if (!task) return res.status(400).json({ success: false, message: 'task is required.' });
+
+        const systemPrompt = "You are an expert teacher and academic content writer. Return ONLY a valid JSON object.";
+        const prompt = `
+Generate a comprehensive deep-dive study guide for the following concept:
+
+Concept: "${task}"
+${subject ? `Subject Area: ${subject}` : ''}
+${hoursAllocated ? `Study Time Allocated: ${hoursAllocated} hours` : ''}
+${due ? `Scheduled: ${due}` : ''}
+
+Use this exact JSON format:
+{
+  "title": "Full concept title",
+  "overview": "2-3 sentence high-level overview of the concept",
+  "sections": [
+    {
+      "heading": "Section heading",
+      "content": "Detailed explanation paragraph",
+      "subsections": [
+        { "subheading": "Subsection title", "content": "Detailed explanation" }
+      ]
+    }
+  ],
+  "definitions": [
+    { "term": "Key term", "definition": "Clear definition" }
+  ],
+  "examples": [
+    { "title": "Example title", "description": "Brief real-world example to illustrate the concept" }
+  ],
+  "solvedExamples": [
+    {
+      "problem": "A clearly stated problem to solve",
+      "steps": [
+        { "stepNumber": 1, "explanation": "What you do in this step and why" }
+      ],
+      "finalAnswer": "The complete answer or result",
+      "takeaway": "What this example teaches about the concept"
+    }
+  ],
+  "practiceQuestions": [
+    { "question": "Sample question?", "hint": "Brief hint to approach it" }
+  ],
+  "relatedConcepts": [
+    { "name": "Related concept name", "relevance": "Why it's related" }
+  ],
+  "proTip": "One expert tip for mastering this concept"
+}
+`;
+        const llmResponse = await callGrokAPI(prompt, systemPrompt, true);
+        let responseText = llmResponse.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+        const detail = JSON.parse(responseText);
+        return res.json({ success: true, detail });
+
+    } catch (err) {
+        console.error('❌ Concept detail error:', err);
+        res.status(500).json({ success: false, message: err.message || 'Failed to fetch concept detail.' });
+    }
+});
+
+app.post('/api/chat', protect, async (req, res) => {
+    try {
+        const { message, history = [] } = req.body;
+
+        if (!message) {
+            return res.status(400).json({ success: false, message: 'message is required.' });
+        }
+
+        const systemMsg = {
+            role: 'system',
+            content: `You are StudySphere AI Tutor — a brilliant, concise academic assistant.
+Your style:
+- Use **bold** for key terms
+- Use numbered lists for steps, bullet points for lists
+- Use triple backticks for code blocks
+- Keep replies focused and helpful
+- End with a tip or follow-up question when useful`,
+        };
+
+        // Convert history from frontend format to OpenAI format
+        let historyMsgs = history.map(h => ({
+            role: h.role === 'model' ? 'assistant' : 'user',
+            content: Array.isArray(h.parts)
+                ? h.parts.map(p => p.text || '').join('\n')
+                : (h.content || ''),
+        }));
+
+        // Remove messages with empty or whitespace-only content
+        historyMsgs = historyMsgs.filter(m => m.content && m.content.trim().length > 0);
+
+        // Strip leading assistant messages — Groq requires history to start with 'user'
+        while (historyMsgs.length > 0 && historyMsgs[0].role === 'assistant') {
+            historyMsgs.shift();
+        }
+
+        // Merge consecutive same-role messages to prevent role alternation errors
+        const deduped = [];
+        for (const msg of historyMsgs) {
+            if (deduped.length > 0 && deduped[deduped.length - 1].role === msg.role) {
+                deduped[deduped.length - 1].content += '\n' + msg.content;
+            } else {
+                deduped.push({ ...msg });
+            }
+        }
+
+        const messages = [systemMsg, ...deduped, { role: 'user', content: message }];
+
+        const apiKey = process.env.GROK_API_KEY;
+        if (!apiKey) throw new Error('GROK_API_KEY is missing from .env');
+
+        const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+                model: 'llama-3.3-70b-versatile',
+                messages,
+                max_tokens: 1500,
+                temperature: 0.7,
+            }),
+        });
+
+        const data = await groqRes.json();
+        if (!groqRes.ok) throw new Error(data?.error?.message || `Groq API error ${groqRes.status}`);
+
+        const reply = data.choices?.[0]?.message?.content?.trim() || '';
+        res.json({ success: true, reply });
+
+    } catch (err) {
+        console.error('Chat Error:', err.message);
+        res.status(500).json({ success: false, message: err.message || 'AI Error' });
+    }
 });
 
 // Start Server
 app.listen(PORT, () => {
-    console.log(`🚀 Server internally running at http://localhost:${PORT}`);
+    console.log(`🚀 Server is internally running at http://localhost:${PORT}`);
 });
