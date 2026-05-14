@@ -44,7 +44,7 @@ const GROK_API_KEY = process.env.GROK_API_KEY;
 
 async function callGrokAPI(prompt, systemPrompt = "You are an expert educational curriculum designer and subject matter expert. Your goal is to teach the student with crystal-clear, deep, and flawless pedagogical content.", jsonMode = true) {
     if (!GROK_API_KEY) throw new Error("Missing GROK_API_KEY in environment variables. Please add GROK_API_KEY=your_key in your backend/.env file.");
-    
+
     console.log("Calling Groq API length of prompt: ", prompt.length);
 
     const bodyObj = {
@@ -56,7 +56,7 @@ async function callGrokAPI(prompt, systemPrompt = "You are an expert educational
         temperature: 0.3,
         max_tokens: 8000
     };
-    
+
     if (jsonMode) {
         bodyObj.response_format = { type: "json_object" };
     }
@@ -69,7 +69,7 @@ async function callGrokAPI(prompt, systemPrompt = "You are an expert educational
         },
         body: JSON.stringify(bodyObj)
     });
-    
+
     const data = await res.json();
     if (!res.ok) throw new Error(`Grok API Error: ${data.error?.message || res.statusText}`);
     return data.choices[0].message.content;
@@ -306,9 +306,9 @@ Instructions:
         console.error("Grok Gen Error:", error);
         // Fallback to mock generation if the key is missing or errored
         if (error.message.includes("Missing GROK_API_KEY")) {
-             return res.status(500).json({ success: false, message: error.message });
+            return res.status(500).json({ success: false, message: error.message });
         }
-        
+
         // Safety Fallback (optional, but good for robust UX if Grok times out)
         const mockCurriculum = {
             overview: {
@@ -340,11 +340,11 @@ app.put('/api/learning-hub/sessions/:sessionId/time', protect, async (req, res) 
         const { incrementSec } = req.body;
         const session = await LearningSession.findOne({ _id: sessionId, userId: req.user._id });
         if (!session) return res.status(404).json({ success: false, message: "Session not found." });
-        
+
         session.timeSpentSec = (session.timeSpentSec || 0) + (Number(incrementSec) || 0);
         await session.save();
         return res.json({ success: true, timeSpentSec: session.timeSpentSec });
-    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Generate modules: Manual topic entry
@@ -363,7 +363,7 @@ app.post('/api/learning-hub/generate/manual', protect, async (req, res) => {
         const modules = generateManualModules(subject, topicsArr);
         const dbSess = await LearningSession.create({ userId: req.user._id, subject, mode: 'manual', modules });
         res.json({ success: true, sessionId: dbSess._id, subject, modules });
-    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Generate modules: PDF / text upload (MVP extraction)
@@ -391,7 +391,7 @@ app.post('/api/learning-hub/generate/pdf', protect, upload.single('file'), async
 
         const modules = generateManualModules(subject, topics);
         const dbSess = await LearningSession.create({ userId: req.user._id, subject, mode: 'pdf', modules });
-        
+
         res.json({ success: true, sessionId: dbSess._id, subject, modules, extractedTopics: topics.slice(0, 10) });
     } catch (err) {
         console.error('PDF extraction failed:', err);
@@ -406,7 +406,7 @@ app.get('/api/learning-hub/sessions/:sessionId', protect, async (req, res) => {
         const session = await LearningSession.findOne({ _id: sessionId, userId: req.user._id });
         if (!session) return res.status(404).json({ success: false, message: 'Session not found.' });
         res.json({ success: true, ...session.toObject() });
-    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Update module progress inside a session
@@ -425,7 +425,7 @@ app.post('/api/learning-hub/sessions/:sessionId/progress', protect, async (req, 
             await session.save();
         }
         res.json({ success: true, modules: session.modules });
-    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Add time spent on a module
@@ -446,7 +446,7 @@ app.post('/api/learning-hub/sessions/:sessionId/modules/:moduleId/time', protect
             await session.save();
         }
         res.json({ success: true, modules: session.modules });
-    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Save notes for a module
@@ -466,7 +466,7 @@ app.post('/api/learning-hub/sessions/:sessionId/modules/:moduleId/notes', protec
             await session.save();
         }
         res.json({ success: true, modules: session.modules });
-    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Get all subjects
@@ -493,7 +493,7 @@ app.get('/api/goals', protect, async (req, res) => {
     try {
         const goals = await Goal.find({ userId: req.user._id }).sort({ createdAt: -1 });
         res.json({ success: true, goals });
-    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 app.post('/api/goals', protect, async (req, res) => {
@@ -501,14 +501,14 @@ app.post('/api/goals', protect, async (req, res) => {
         const { title, tasks } = req.body;
         const newGoal = await Goal.create({ userId: req.user._id, title, tasks });
         res.json({ success: true, goal: newGoal });
-    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 app.delete('/api/goals/:id', protect, async (req, res) => {
     try {
         await Goal.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
         res.json({ success: true });
-    } catch(e) { res.status(500).json({ success: false, message: e.message }); }
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // AI Assistant Route
@@ -549,7 +549,7 @@ app.get('/api/analytics', protect, async (req, res) => {
             } else {
                 sessionSeconds += (Number(session.timeSpentSec) || 0);
             }
-            
+
             totalSeconds += sessionSeconds;
             subjectTimeMap[subject] += sessionSeconds;
             dailyStudyMap[dateStr][subject] += sessionSeconds;
@@ -571,20 +571,20 @@ app.get('/api/analytics', protect, async (req, res) => {
         else if (minTime === Infinity) leastSubject = topSubject;
 
         // Calculate Login Streak
-        const sortedDates = Object.keys(dailyStudyMap).sort((a,b) => new Date(b) - new Date(a));
+        const sortedDates = Object.keys(dailyStudyMap).sort((a, b) => new Date(b) - new Date(a));
         let streak = 0;
         let cursorDate = new Date(); // Start from today
-        cursorDate.setHours(0,0,0,0);
+        cursorDate.setHours(0, 0, 0, 0);
 
         // Simple backward continuous timeline checker
         if (sortedDates.length > 0) {
             for (let i = 0; i < sortedDates.length; i++) {
                 const logDate = new Date(sortedDates[i]);
-                logDate.setHours(0,0,0,0);
-                
+                logDate.setHours(0, 0, 0, 0);
+
                 const diffTime = cursorDate - logDate;
                 const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-                
+
                 if (diffDays === 0 || diffDays === 1) {
                     streak++;
                     cursorDate = logDate; // Push cursor backward
@@ -637,7 +637,7 @@ app.post('/api/generate-plan', protect, upload.single('document'), async (req, r
             }
         }
 
-        const totalDays  = parseInt(days)       || 30;
+        const totalDays = parseInt(days) || 30;
         const dailyHours = parseInt(hoursPerDay) || 2;
         const totalHours = totalDays * dailyHours;
 
@@ -688,21 +688,21 @@ Format:
 
             const fakeTasks = concepts.map((concept, index) => {
                 const isLast = index === concepts.length - 1;
-                const hours  = isLast ? hoursLeft : hoursPerConcept;
-                hoursLeft   -= hours;
+                const hours = isLast ? hoursLeft : hoursPerConcept;
+                hoursLeft -= hours;
 
                 return {
-                    id:             index + 1, // ✅ ids start at 1, never 0
-                    task:           `${concept} — ${subject || 'Uploaded Material'}`,
-                    due:            `Day ${Math.ceil((index + 1) * (totalDays / concepts.length))}`,
+                    id: index + 1, // ✅ ids start at 1, never 0
+                    task: `${concept} — ${subject || 'Uploaded Material'}`,
+                    due: `Day ${Math.ceil((index + 1) * (totalDays / concepts.length))}`,
                     hoursAllocated: hours,
-                    completed:      false
+                    completed: false
                 };
             });
 
             return res.json({
                 success: true,
-                tasks:   fakeTasks,
+                tasks: fakeTasks,
                 message: 'Mock roadmap returned. Add GEMINI_API_KEY to .env for real AI output.'
             });
         }
@@ -713,7 +713,7 @@ Format:
             success: false,
             // ✅ Send the real error so the frontend can display it
             message: err.message || 'Failed to generate AI plan.',
-            error:   err.message
+            error: err.message
         });
     }
 });
